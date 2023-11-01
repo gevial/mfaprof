@@ -20,11 +20,12 @@ const (
 	awsMfaCodePattern        = `^\d{6,6}$`
 	awsMfaDevicePattern      = `^[\w+=/:,.@-]{9,256}$`
 	awsCliProfileNamePattern = `^[\w-]+$`
-	awsProfileSectionPattern = `\[profile %s\]`
+	awsProfileSectionPattern = `\[(profile )?%s\]`
 	awsDefaultProfile        = "default"
 )
 
 var (
+	debug, quiet               bool
 	errInvalidCode             = errors.New("code must be exactly 6 digits")
 	errInvalidDevice           = errors.New("device serial number is not valid")
 	errInvalidProfileName      = errors.New("profile name must be alphanumeric (underscores and hyphens allowed)")
@@ -37,11 +38,23 @@ var (
 
 type options struct {
 	profile, name, code, device, region string
-	debug                               bool
+	debug, quiet                        bool
 }
 
 type iamListMFADevicesAPI interface {
 	ListMFADevices(ctx context.Context, params *iam.ListMFADevicesInput, optFns ...func(*iam.Options)) (*iam.ListMFADevicesOutput, error)
+}
+
+func debugMsg(msg string, a ...any) {
+	if debug {
+		log.Printf("[DEBUG] "+msg, a...)
+	}
+}
+
+func logMsg(msg string, a ...any) {
+	if !quiet {
+		log.Printf(msg, a...)
+	}
 }
 
 func parseFlags() *options {
@@ -51,11 +64,13 @@ func parseFlags() *options {
 	flag.StringVar(&opt.name, "name", "",
 		"(Optional) Name of the resulting AWS CLI profile. Default: current or specified AWS CLI profile name + _mfa.")
 	flag.StringVar(&opt.code, "code", "",
-		"(Madnatory) The value provided by the MFA device.")
+		"(Optional) The value provided by the MFA device. When omitted, an interactive prompt is shown.")
 	flag.StringVar(&opt.device, "device", "",
 		"(Optional) Either the serial number for a hardware device or an ARN for a virtual device. "+
 			"Default: the first MFA device from ListMFADevices API call.")
-	flag.BoolVar(&opt.debug, "debug", false, "(Optional) Enables debug messages.")
+	flag.BoolVar(&opt.debug, "debug", false, "(Optional) Enables debug messages, ignores quiet flag.")
+	flag.BoolVar(&opt.quiet, "quiet", false, "(Optional) Suppress non-debug messages.")
+
 	flag.Parse()
 	return &opt
 }
@@ -109,28 +124,28 @@ func getFirstDevice(api iamListMFADevicesAPI) (string, error) {
 
 func saveNewProfile(name string, region string, stsOutput *sts.GetSessionTokenOutput) error {
 	// cmd.Run() doesn't invoke shell and doesn't evaluate globs
-	log.Printf("Running command 1 out of 4: aws configure set aws_access_key_id <VALUE> --profile %s", name)
+	logMsg("Running command 1 out of 4: aws configure set aws_access_key_id <VALUE> --profile %s", name)
 	err := exec.Command(
 		"aws", "configure", "set", "aws_access_key_id",
 		*stsOutput.Credentials.AccessKeyId, "--profile", name).Run()
 	if err != nil {
 		return err
 	}
-	log.Printf("Running command 2 out of 4: aws configure set aws_secret_access_key <VALUE> --profile %s", name)
+	logMsg("Running command 2 out of 4: aws configure set aws_secret_access_key <VALUE> --profile %s", name)
 	err = exec.Command(
 		"aws", "configure", "set", "aws_secret_access_key",
 		*stsOutput.Credentials.SecretAccessKey, "--profile", name).Run()
 	if err != nil {
 		return err
 	}
-	log.Printf("Running command 3 out of 4: aws configure set aws_session_token <VALUE> --profile %s", name)
+	logMsg("Running command 3 out of 4: aws configure set aws_session_token <VALUE> --profile %s", name)
 	err = exec.Command(
 		"aws", "configure", "set", "aws_session_token",
 		*stsOutput.Credentials.SessionToken, "--profile", name).Run()
 	if err != nil {
 		return err
 	}
-	log.Printf("Running command 4 out of 4: aws configure set region %s --profile %s", region, name)
+	logMsg("Running command 4 out of 4: aws configure set region %s --profile %s", region, name)
 	err = exec.Command(
 		"aws", "configure", "set", "region",
 		region, "--profile", name).Run()
@@ -142,14 +157,17 @@ func saveNewProfile(name string, region string, stsOutput *sts.GetSessionTokenOu
 
 func main() {
 	opt := parseFlags()
-
-	debug := func(format string, a ...any) {
-		if opt.debug {
-			log.Printf("[DEBUG] "+format, a...)
-		}
+	debug = opt.debug
+	if !debug {
+		quiet = opt.quiet
 	}
 
-	// We need to resolve shared config filename to validate if the provided profile exists
+	if opt.code == "" {
+		fmt.Print("Enter MFA code: ")
+		fmt.Scanln(&opt.code)
+	}
+
+	// We need to resolve shared config filename to validate that the provided profile exists
 	configFile := config.DefaultSharedConfigFilename()
 	envConfig, err := config.NewEnvConfig()
 	if err != nil {
@@ -158,7 +176,7 @@ func main() {
 	if envConfig.SharedConfigFile != "" {
 		configFile = envConfig.SharedConfigFile
 	}
-	debug("Using shared config file %q", configFile)
+	debugMsg("Using shared config file %q", configFile)
 	if opt.profile == "" {
 		if envConfig.SharedConfigProfile != "" {
 			opt.profile = envConfig.SharedConfigProfile
@@ -166,12 +184,13 @@ func main() {
 			opt.profile = awsDefaultProfile
 		}
 	}
+	debugMsg("Using profile name %q", opt.profile)
 
 	if opt.name == "" {
 		opt.name = opt.profile + defaultNameSuffix
 	}
 
-	debug("Args: %+v", opt)
+	debugMsg("Args: %+v", opt)
 
 	err = validateFlags(opt, configFile)
 	if err != nil {
@@ -186,17 +205,17 @@ func main() {
 	}
 
 	opt.region = cfg.Region
-	debug("Detected region: %s", opt.region)
+	debugMsg("Detected region: %s", opt.region)
 
 	if opt.device == "" {
-		log.Print("No MFA device serial number provided, getting one from ListMFADevices")
+		logMsg("No MFA device serial number provided, getting one from ListMFADevices")
 		opt.device, err = getFirstDevice(iam.NewFromConfig(cfg))
 		if err != nil {
 			log.Fatal(err)
 		}
 	}
 
-	log.Print("Getting temporary credentials")
+	logMsg("Getting temporary credentials")
 	stsOutput, err := sts.NewFromConfig(cfg).GetSessionToken(
 		context.TODO(),
 		&sts.GetSessionTokenInput{SerialNumber: &opt.device, TokenCode: &opt.code},
@@ -205,7 +224,7 @@ func main() {
 		log.Fatal(err)
 	}
 
-	log.Println("Saving new profile")
+	logMsg("Saving new profile")
 	err = saveNewProfile(opt.name, opt.region, stsOutput)
 	if err != nil {
 		log.Fatal(err)
@@ -222,5 +241,5 @@ For Windows:
 
 Or use --profile argument with AWS CLI.
 `
-	fmt.Printf(message, opt.name)
+	logMsg(message, opt.name)
 }
