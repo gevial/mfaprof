@@ -9,7 +9,7 @@ jobs:
         os: ["windows-latest", "ubuntu-latest", "macOS-latest"]
     runs-on: ${{ matrix.os }}
     env:
-      GO_VERSION: 1.19
+      GO_VERSION: 1.21
     steps:
       - uses: actions/checkout@v3
 
