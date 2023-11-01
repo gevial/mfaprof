@@ -16,12 +16,13 @@ import (
 )
 
 const (
-	defaultNameSuffix        = "_mfa"
-	awsMfaCodePattern        = `^\d{6,6}$`
-	awsMfaDevicePattern      = `^[\w+=/:,.@-]{9,256}$`
-	awsCliProfileNamePattern = `^[\w-]+$`
-	awsProfileSectionPattern = `\[(profile )?%s\]`
-	awsDefaultProfile        = "default"
+	defaultNameSuffix               = "_mfa"
+	awsMfaCodePattern               = `^\d{6,6}$`
+	awsMfaDevicePattern             = `^[\w+=/:,.@-]{9,256}$`
+	awsCliProfileNamePattern        = `^[\w-]+$`
+	awsNamedProfileSectionPattern   = `\[profile %s\]`
+	awsDefaultProfileSectionPattern = `\[default\]`
+	awsDefaultProfile               = "default"
 )
 
 var (
@@ -100,7 +101,13 @@ func validateFlags(opt *options, configFilename string) error {
 	if err != nil {
 		return fmt.Errorf("%w: %v", errSharedConfigUnavailable, err)
 	}
-	profileExists, err := regexp.Match(fmt.Sprintf(awsProfileSectionPattern, opt.profile), cfgFile)
+	var profilePattern string
+	if opt.profile != awsDefaultProfile {
+		profilePattern = fmt.Sprintf(awsNamedProfileSectionPattern, opt.profile)
+	} else {
+		profilePattern = awsDefaultProfileSectionPattern
+	}
+	profileExists, err := regexp.Match(profilePattern, cfgFile)
 	if err != nil {
 		return fmt.Errorf("%w: %v", errCannotParseConfig, err)
 	}
